@@ -1,4 +1,6 @@
-﻿tkinter
-requests
+﻿selenium
+webdriver-manager
+python-dotenv
 beautifulsoup4
 lxml
+
