@@ -1,0 +1,4 @@
+﻿tkinter
+requests
+beautifulsoup4
+lxml
