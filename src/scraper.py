@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
@@ -15,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class SchedulerScraper:
-    LOGIN_URL     = (
+    LOGIN_URL = (
         "https://loginseguro.petrobras.com.br/fwca/pages/AuthenticationForm.jsp?"
         "successfulUrl=https%3a%2f%2fex-ciem2.petrobras.com.br%3a443%2f"
         "&ssoEnabled=False&applicationCatalogId=CIE2"
@@ -35,33 +36,35 @@ class SchedulerScraper:
         chrome_opts.add_argument("--no-sandbox")
         chrome_opts.add_argument("--disable-gpu")
 
-        # inicializa WebDriver
-        self.driver = webdriver.Chrome(
-            ChromeDriverManager().install(),
-            options=chrome_opts
-        )
+        service = Service(ChromeDriverManager().install())
+        self.driver = webdriver.Chrome(service=service, options=chrome_opts)
 
     def login(self):
         drv = self.driver
         drv.get(self.LOGIN_URL)
 
-        # 1) Clicar em "Logar com usuário externo"
-        btn_ext = WebDriverWait(drv, 10).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'usuário externo')]"))
+        # 1) Clicar na opção "Logar com usuário externo"
+        ext_label = WebDriverWait(drv, 10).until(
+            EC.element_to_be_clickable((
+                By.XPATH,
+                "//div[@id='wrap-options-login']//label[contains(normalize-space(.), 'usuário externo')]"
+            ))
         )
-        btn_ext.click()
+        ext_label.click()
 
-        # 2) Preencher usuário e senha
+        # 2) Aguarda até o bloco de senha externo ficar visível
         WebDriverWait(drv, 10).until(
-            EC.presence_of_element_located((By.NAME, "j_username"))
+            EC.visibility_of_element_located((By.ID, "txt_user_login"))
         )
-        drv.find_element(By.NAME, "j_username").send_keys(self.user)
-        drv.find_element(By.NAME, "j_password").send_keys(self.pw)
 
-        # 3) Submeter o formulário
-        drv.find_element(By.XPATH, "//button[@type='submit']").click()
+        # 3) Preenche usuário e senha
+        drv.find_element(By.ID, "txt_user_login").send_keys(self.user)
+        drv.find_element(By.ID, "pwd_user_password").send_keys(self.pw)
 
-        # 4) Esperar o redirecionamento ao Scheduler
+        # 4) Clica em “Entrar”
+        drv.find_element(By.ID, "button-verify").click()
+
+        # 5) Aguarda o redirecionamento ao Scheduler
         WebDriverWait(drv, 15).until(
             EC.url_contains("/Scheduler")
         )
@@ -80,20 +83,5 @@ class SchedulerScraper:
         soup = BeautifulSoup(html, "lxml")
 
         container = soup.select_one("#dps")
-        if not container:
-            raise RuntimeError("Container #dps não encontrado na página")
-
-        # extrai apenas eventos com padrão 006000xxxxxx
-        data = {}
-        for e in container.select(".ciem_theme_event_inner"):
-            text = e.get_text(strip=True)
-            m = re.search(r"(006000\d+)", text)
-            if m:
-                key = m.group(1)
-                data[key] = text
-        return data
-
-    def close(self):
-        """Encerra o browser cleanly."""
-        self.driver.quit()
+        i
 
