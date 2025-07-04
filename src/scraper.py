@@ -22,27 +22,25 @@ load_dotenv()
 
 class SchedulerScraper:
     """
-    Realiza login na página segura da Petrobras e extrai eventos de ordens de serviço
-    exibidos no container #dps.
+    Realiza login na plataforma da Petrobras e extrai eventos de ordens de serviço
+    exibidos no container #dps da página Scheduler.
     """
 
-    # URL de login já com parâmetro para redirecionar ao Scheduler
     LOGIN_URL = (
         "https://loginseguro.petrobras.com.br/fwca/pages/AuthenticationForm.jsp?"
         "successfulUrl=https%3a%2f%2fex-ciem2.petrobras.com.br%2fScheduler"
     )
-
-    # Tempo máximo de espera (em segundos)
-    TIMEOUT = 30
+    TIMEOUT_LOGIN = 20
+    TIMEOUT_EVENTS = 30
 
     def __init__(self):
-        # Lê credenciais do .env
+        # Credenciais
         self.user = os.getenv('CIEM_USER')
         self.pw   = os.getenv('CIEM_PW')
-        if not self.user or not self.pw:
+        if not (self.user and self.pw):
             raise RuntimeError('Defina CIEM_USER e CIEM_PW no .env')
 
-        # Configura Chrome headless
+        # Chrome headless
         opts = webdriver.ChromeOptions()
         opts.add_argument('--headless')
         opts.add_argument('--no-sandbox')
@@ -52,68 +50,63 @@ class SchedulerScraper:
         self.driver = webdriver.Chrome(service=service, options=opts)
         logger.info('WebDriver inicializado')
 
-    def login_and_wait(self) -> str:
+    def login_and_wait(self) -> None:
         """
-        Executa o fluxo de login (seleciona usuário externo, preenche credenciais,
-        envia o formulário) e aguarda o carregamento da página do Scheduler.
-        Retorna o HTML da página ao final.
+        Executa o fluxo de login e aguarda o carregamento inicial do Scheduler.
         """
-        self.driver.get(self.LOGIN_URL)
-        logger.info('Acessando a página de login')
+        drv = self.driver
+        drv.get(self.LOGIN_URL)
+        logger.info('Acessando página de login')
 
-        # Aguarda as opções de login aparecerem
-        WebDriverWait(self.driver, self.TIMEOUT).until(
-            EC.presence_of_element_located((By.ID, 'wrap-options-login'))
-        )
-
-        # Clica em "Logar com usuário externo"
-        self.driver.find_element(
-            By.XPATH,
-            "//div[@id='wrap-options-login']//label[contains(normalize-space(.), 'usuário externo')]"
+        # Seleciona "usuário externo"
+        WebDriverWait(drv, self.TIMEOUT_LOGIN).until(
+            EC.element_to_be_clickable((By.XPATH, "//label[contains(normalize-space(.),'usuário externo')]'"))
         ).click()
-        logger.info('Selecionada opção usuário externo')
+        logger.info('Opção usuário externo selecionada')
 
-        # Aguarda o formulário de usuário externo aparecer
-        WebDriverWait(self.driver, self.TIMEOUT).until(
+        # Aguarda formulário
+        WebDriverWait(drv, self.TIMEOUT_LOGIN).until(
             EC.visibility_of_element_located((By.ID, 'wrap-login-password'))
         )
 
-        # Preenche usuário e senha
-        self.driver.find_element(By.ID, 'txt_user_login').send_keys(self.user)
-        self.driver.find_element(By.ID, 'pwd_user_password').send_keys(self.pw)
+        # Preenche
+        drv.find_element(By.ID, 'txt_user_login').send_keys(self.user)
+        drv.find_element(By.ID, 'pwd_user_password').send_keys(self.pw)
         logger.info('Credenciais preenchidas')
 
-        # Envia o formulário
-        self.driver.find_element(By.ID, 'button-verify').click()
-        logger.info('Formulário enviado, aguardando Scheduler')
+        # Submete
+        drv.find_element(By.ID, 'button-verify').click()
+        logger.info('Submetido, aguardando Scheduler')
 
-        # Aguarda o container #dps na página do Scheduler
-        WebDriverWait(self.driver, self.TIMEOUT).until(
+        # Aguarda container #dps inicial
+        WebDriverWait(drv, self.TIMEOUT_LOGIN).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, '#dps'))
         )
-        logger.info('Scheduler carregado com sucesso')
-
-        return self.driver.page_source
+        logger.info('Página Scheduler carregada')
 
     def fetch(self) -> dict:
         """
-        Faz o login e retorna um dicionário com as entradas 006000xxxxxx mapeadas
-        para o texto completo de cada evento.
+        Faz login, aguarda eventos aparecerem, e retorna dicionário {id: texto}.
         """
         try:
-            html = self.login_and_wait()
+            self.login_and_wait()
         except TimeoutException as e:
-            # Salva debug em caso de falha
-            with open('debug.html', 'w', encoding='utf8') as f:
-                f.write(self.driver.page_source)
-            self.driver.save_screenshot('debug.png')
-            raise RuntimeError('Timeout ao carregar Scheduler. Veja debug.html/debug.png') from e
+            self._debug('login')
+            raise RuntimeError('Falha no login ou carregamento inicial') from e
 
-        # Parse do HTML
+        # Espera eventos carregarem via AJAX
+        try:
+            WebDriverWait(self.driver, self.TIMEOUT_EVENTS).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, '.ciem_theme_event_inner'))
+            )
+        except TimeoutException:
+            logger.warning('Nenhum evento apareceu em %d segundos', self.TIMEOUT_EVENTS)
+
+        html = self.driver.page_source
         soup = BeautifulSoup(html, 'lxml')
         container = soup.select_one('#dps')
         if not container:
-            raise RuntimeError('#dps não encontrado no HTML')
+            raise RuntimeError('Container #dps ausente no HTML final')
 
         data = {}
         for element in container.select('.ciem_theme_event_inner'):
@@ -122,11 +115,19 @@ class SchedulerScraper:
             if m:
                 data[m.group(1)] = text
 
-        logger.info('Extraídos %d eventos', len(data))
+        logger.info('Eventos extraídos: %d', len(data))
         return data
 
     def close(self):
         """Encerra o browser."""
         self.driver.quit()
         logger.info('WebDriver finalizado')
+
+    def _debug(self, stage: str):
+        """Salva HTML e screenshot para depuração."""
+        filename = f'debug_{stage}.html'
+        with open(filename, 'w', encoding='utf8') as f:
+            f.write(self.driver.page_source)
+        self.driver.save_screenshot(f'debug_{stage}.png')
+        logger.info('Debug salvo: %s e %s', filename, f'debug_{stage}.png')
 
